@@ -5,7 +5,12 @@ import keyboard
 import time
 import os
 import csv
+import numpy as np
+import joblib
 from datetime import datetime
+import pickle
+import tensorflow as tf
+from tensorflow.keras.models import load_model
 
 class Driver(object):
     '''
@@ -53,10 +58,33 @@ class Driver(object):
         self.shift_delay = 0  # Prevent too rapid gear changes
         self.shift_delay_time = 10  # Frames to wait between shifts
         
-        print("Driver initialized. Controls:")
-        print("W: Accelerate | S: Brake/Reverse | A: Turn Left | D: Turn Right | Q: Quit")
-        print("\nAutomatic transmission enabled")
-    
+        # Load AI model and scaler
+        self.load_ai_model()
+        
+        # Mode selection (AI or manual)
+        self.ai_mode = True
+        
+        print("Driver initialized.")
+        print("Press 'M' to toggle between AI mode and Manual mode")
+        print("Manual Controls: W: Accelerate | S: Brake/Reverse | A: Turn Left | D: Turn Right | Q: Quit")
+        
+    def load_ai_model(self):
+        '''Load the trained neural network model and scaler'''
+       
+        model_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
+        model_path = os.path.join(model_dir, "torcs_driver_model.keras")
+        scaler_path = os.path.join(model_dir, "torcs_scaler.joblib")
+        try:
+            self.model = load_model(model_path)
+            self.scaler = joblib.load(scaler_path)
+            print(f"AI model loaded successfully from {model_path}")
+            self.model_loaded = True
+        except Exception as e:
+            print(f"Failed to load AI model: {e}")
+            print("Falling back to manual control mode")
+            self.model_loaded = False
+            self.ai_mode = False
+            
     def create_csv_file(self):
         '''Create CSV file with headers for telemetry data'''
         with open(self.csv_filename, 'w', newline='') as csvfile:
@@ -132,10 +160,24 @@ class Driver(object):
         return self.parser.stringify({'init': self.angles})
     
     def drive(self, msg):
-       
         self.state.setFromMsg(msg)
         
-        self.handle_keyboard_input()
+        # Check for mode switch
+        if keyboard.is_pressed('m'):
+            # Simple debounce
+            time.sleep(0.2)
+            if self.model_loaded:
+                self.ai_mode = not self.ai_mode
+                mode_name = "AI" if self.ai_mode else "Manual"
+                print(f"Switched to {mode_name} mode")
+            else:
+                print("AI mode not available - model not loaded")
+        
+        # Use AI model for control or manual input
+        if self.ai_mode and self.model_loaded:
+            self.handle_ai_control()
+        else:
+            self.handle_keyboard_input()
         
         # Save telemetry data
         self.log_data()
@@ -145,6 +187,106 @@ class Driver(object):
             return "(meta 1)"
         
         return self.control.toMsg()
+    
+    def prepare_state_for_model(self):
+        '''Convert current car state to the format expected by the model'''
+        # Create a feature vector in the same order as the training data
+        features = np.array([[
+            self.state.angle,
+            self.state.curLapTime,
+            self.state.damage,
+            self.state.distFromStart,
+            self.state.distRaced,
+            self.state.fuel,
+            self.state.lastLapTime,
+            # Add opponent distances - using first value for all if not available
+            *([self.state.opponents[0] if len(self.state.opponents) > 0 else 200.0] * 36),
+            self.state.racePos,
+            self.state.rpm,
+            self.state.speedX,
+            self.state.speedY,
+            self.state.speedZ,
+            # Add track sensor data
+            *([sensor for sensor in self.state.track]),
+            self.state.trackPos,
+            # Add wheel velocities
+            *([vel for vel in self.state.wheelSpinVel]),
+            self.state.z
+        ]])
+        
+        # Scale the features using the same scaler used during training
+        return self.scaler.transform(features)
+    
+    def handle_ai_control(self):
+        '''Use the trained neural network to control the car'''
+        try:
+            # Prepare input for the model
+            scaled_state = self.prepare_state_for_model()
+            
+            # Get model predictions
+            predictions = self.model.predict(scaled_state, verbose=0)[0]
+            
+            # Extract individual control values
+            acceleration = float(predictions[0])  # Acceleration
+            brake = float(predictions[1])         # Braking
+            clutch = float(predictions[2])        # Clutch
+            # gear = int(round(predictions[3]))    # Gear - not using this
+            steering = float(predictions[4])      # Steering
+            
+            # Clip values to valid ranges
+            acceleration = max(0.0, min(1.0, acceleration))
+            brake = max(0.0, min(1.0, brake))
+            clutch = max(0.0, min(1.0, clutch))
+            steering = max(-1.0, min(1.0, steering))
+            
+            # Apply the values to control
+            self.control.setAccel(acceleration)
+            self.control.setBrake(brake)
+            self.control.setSteer(steering)
+            
+            # Use rule-based gear selection instead of model prediction
+            self.set_gear_based_on_rpm()
+            
+            # Update current steer for smoothness in transitions
+            self.current_steer = steering
+            
+        except Exception as e:
+            print(f"Error in AI control: {e}")
+            print("Falling back to manual control")
+            self.ai_mode = False
+            self.handle_keyboard_input()
+    
+    def set_gear_based_on_rpm(self):
+        '''Apply rule-based gear selection based on RPM'''
+        gear = self.control.getGear()
+        rpm = self.state.getRpm()
+        speed = self.state.getSpeedX()
+        
+        # Decrease shift delay counter
+        if self.shift_delay > 0:
+            self.shift_delay -= 1
+            return
+        
+        # Only change gears when the shift delay is zero
+        if self.shift_delay == 0:
+            if gear == -1:  # If in reverse
+                if speed > 0:  # Going forward in reverse gear
+                    gear = 1
+                    self.shift_delay = self.shift_delay_time
+            elif gear == 0:  # Neutral
+                gear = 1
+            else:  # Forward gears
+                if rpm > 8000 and gear < 6:  # Upshift
+                    gear += 1
+                    self.shift_delay = self.shift_delay_time
+                elif rpm < 3000 and gear > 1:  # Downshift
+                    gear -= 1
+                    self.shift_delay = self.shift_delay_time
+                elif speed < 5 and gear > 1:  # Downshift at very low speeds
+                    gear = 1
+                    self.shift_delay = self.shift_delay_time
+        
+        self.control.setGear(gear)
     
     def handle_keyboard_input(self):
         '''Get keyboard input and apply to car controls'''
