@@ -42,75 +42,70 @@ sock.settimeout(1.0)
 
 shutdownClient = False
 curEpisode = 0
-verbose = True
+verbose = False
 
 d = driver.Driver(arguments.stage)  # Ensure driver.Driver is compatible
 
 while not shutdownClient:
     while True:
         print('Sending id to server: ', arguments.id)
-        buf = arguments.id + d.init()  # Assuming d.init() returns a string
-        print('Sending init string to server:', buf)
-        
+        buf = arguments.id + d.init()
         try:
-            sock.sendto(buf.encode('utf-8'), (arguments.host_ip, arguments.host_port))  # Encode to bytes
+            sock.sendto(buf.encode('utf-8'), (arguments.host_ip, arguments.host_port))
         except socket.error as msg:
-            print("Failed to send data:", msg)
             sys.exit(-1)
-            
-        try:
-            buf, addr = sock.recvfrom(1000)  # Received data is bytes
-            buf = buf.decode('utf-8')  # Decode bytes to string for processing
-        except socket.error as msg:
-            print("Didn't get response from server:", msg)
-            continue  # Avoid exiting; retry instead
-    
-        if buf.find('***identified***') >= 0:
-            print('Received: ', buf)
-            break
-
-    currentStep = 0
-    
-    while True:
-        # Wait for an answer from server
-        buf = None
         try:
             buf, addr = sock.recvfrom(1000)
-            buf = buf.decode('utf-8')  # Decode received bytes to string
+            buf = buf.decode('utf-8')
+        except socket.error as msg:
+            continue
+        if buf.find('***identified***') >= 0:
+            break
+
+    # --- Step-based main loop like client.py ---
+    if arguments.max_steps == 0:
+        arguments.max_steps = 1000000
+    for step in range(arguments.max_steps, 0, -1):
+        try:
+            buf, addr = sock.recvfrom(1000)
+            buf = buf.decode('utf-8')
         except socket.error as msg:
             print("Didn't get response from server:", msg)
-        
+            continue
+
         if verbose and buf is not None:
             print('Received: ', buf)
-        
-        if buf and '***shutdown***' in buf:  # Use 'in' instead of find() for readability
+
+        if buf and '***shutdown***' in buf:
             d.onShutDown()
             shutdownClient = True
             print('Client Shutdown')
             break
-        
+
         if buf and '***restart***' in buf:
             d.onRestart()
             print('Client Restart')
             break
-        
-        currentStep += 1
-        if currentStep != arguments.max_steps:
-            if buf:
-                buf = d.drive(buf)  # Assuming d.drive() returns a string
-        else:
-            buf = '(meta 1)'  # Signal to end episode
-        
-        if verbose and buf:
-            print('Sending: ', buf)
-        
-        if buf:
+
+        # Only drive and send every 3rd step
+        if step % 3 == 0 and buf:
+            outmsg = d.drive(buf)
+            if verbose and outmsg:
+                print('Sending: ', outmsg)
+            if outmsg:
+                try:
+                    sock.sendto(outmsg.encode('utf-8'), (arguments.host_ip, arguments.host_port))
+                except socket.error as msg:
+                    print("Failed to send data:", msg)
+                    sys.exit(-1)
+        # End episode if steps run out
+        if step == 1:
             try:
-                sock.sendto(buf.encode('utf-8'), (arguments.host_ip, arguments.host_port))  # Encode to bytes
+                sock.sendto('(meta 1)'.encode('utf-8'), (arguments.host_ip, arguments.host_port))
             except socket.error as msg:
                 print("Failed to send data:", msg)
                 sys.exit(-1)
-    
+
     curEpisode += 1
     if curEpisode == arguments.max_episodes:
         shutdownClient = True

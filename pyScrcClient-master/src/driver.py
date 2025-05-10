@@ -1,10 +1,11 @@
+import warnings
 import msgParser
 import carState
 import carControl
-import keyboard
 import time
 import os
 import csv
+import keyboard
 import numpy as np
 import joblib
 from datetime import datetime
@@ -80,7 +81,8 @@ class Driver(object):
             print(f"AI model loaded successfully from {model_path}")
             self.model_loaded = True
         except Exception as e:
-            print(f"Failed to load AI model: {e}")
+            print(f"Failed to load AI model from: {model_path} and error: {e}")
+            exit(1)
             print("Falling back to manual control mode")
             self.model_loaded = False
             self.ai_mode = False
@@ -180,7 +182,7 @@ class Driver(object):
             self.handle_keyboard_input()
         
         # Save telemetry data
-        self.log_data()
+       # self.log_data()
         
         if keyboard.is_pressed('q'):
             print("User requested to quit")
@@ -191,28 +193,27 @@ class Driver(object):
     def prepare_state_for_model(self):
         '''Convert current car state to the format expected by the model'''
         # Create a feature vector in the same order as the training data
-        features = np.array([[
-            self.state.angle,
-            self.state.curLapTime,
-            self.state.damage,
-            self.state.distFromStart,
-            self.state.distRaced,
-            self.state.fuel,
-            self.state.lastLapTime,
-            # Add opponent distances - using first value for all if not available
-            *([self.state.opponents[0] if len(self.state.opponents) > 0 else 200.0] * 36),
-            self.state.racePos,
-            self.state.rpm,
-            self.state.speedX,
-            self.state.speedY,
-            self.state.speedZ,
-            # Add track sensor data
-            *([sensor for sensor in self.state.track]),
-            self.state.trackPos,
-            # Add wheel velocities
-            *([vel for vel in self.state.wheelSpinVel]),
-            self.state.z
-        ]])
+        features = np.ndarray((71,), dtype=np.float64)
+        features[0] = self.state.angle
+        features[1] = self.state.curLapTime
+        features[2] = self.state.damage
+        features[3] = self.state.distFromStart
+        features[4] = self.state.distRaced
+        features[5] = self.state.fuel
+        features[6] = self.state.lastLapTime
+        # Add opponent distances - using first value for all if not available
+        features[7:43] = self.state.opponents
+        features[43] = self.state.racePos
+        features[44] = self.state.rpm
+        features[45] = self.state.speedX
+        features[46] = self.state.speedY
+        features[47] = self.state.speedZ
+        # Add track sensor data
+        features[48:67] = [sensor for sensor in self.state.track]
+        features[67] = self.state.trackPos
+        # Add wheel velocities
+        features[68:72] = [vel for vel in self.state.wheelSpinVel]
+        features[72] = self.state.z
         
         # Scale the features using the same scaler used during training
         return self.scaler.transform(features)
@@ -221,25 +222,28 @@ class Driver(object):
         '''Use the trained neural network to control the car'''
         try:
             # Prepare input for the model
-            scaled_state = self.prepare_state_for_model()
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning, message="X does not have valid feature names")
+                scaled_state = self.prepare_state_for_model()
+       
             
             # Get model predictions
-            predictions = self.model.predict(scaled_state, verbose=0)[0]
+            predictions = self.model.predict(scaled_state.reshape(1,-1), verbose=0)[0]
             
             # Extract individual control values
             acceleration = float(predictions[0])  # Acceleration
             brake = float(predictions[1])         # Braking
-            clutch = float(predictions[2])        # Clutch
-            # gear = int(round(predictions[3]))    # Gear - not using this
-            steering = float(predictions[4])      # Steering
+            steering = float(predictions[2])     # Steering
             
             # Clip values to valid ranges
             acceleration = max(0.0, min(1.0, acceleration))
             brake = max(0.0, min(1.0, brake))
-            clutch = max(0.0, min(1.0, clutch))
+           # clutch = max(0.0, min(1.0, clutch))
             steering = max(-1.0, min(1.0, steering))
-            
+
+        
             # Apply the values to control
+            print(f"AI Control - Accel: {acceleration}, Brake: {brake}, Steering: {steering}")
             self.control.setAccel(acceleration)
             self.control.setBrake(brake)
             self.control.setSteer(steering)
