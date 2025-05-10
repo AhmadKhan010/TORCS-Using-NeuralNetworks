@@ -12,6 +12,7 @@ from datetime import datetime
 import pickle
 import tensorflow as tf
 from tensorflow.keras.models import load_model
+import keras
 
 class Driver(object):
     '''
@@ -193,28 +194,27 @@ class Driver(object):
     def prepare_state_for_model(self):
         '''Convert current car state to the format expected by the model'''
         # Create a feature vector in the same order as the training data
-        features = np.ndarray((71,), dtype=np.float64)
-        features[0] = self.state.angle
-        features[1] = self.state.curLapTime
-        features[2] = self.state.damage
-        features[3] = self.state.distFromStart
-        features[4] = self.state.distRaced
-        features[5] = self.state.fuel
-        features[6] = self.state.lastLapTime
-        # Add opponent distances - using first value for all if not available
-        features[7:43] = self.state.opponents
-        features[43] = self.state.racePos
-        features[44] = self.state.rpm
-        features[45] = self.state.speedX
-        features[46] = self.state.speedY
-        features[47] = self.state.speedZ
-        # Add track sensor data
-        features[48:67] = [sensor for sensor in self.state.track]
-        features[67] = self.state.trackPos
-        # Add wheel velocities
-        features[68:72] = [vel for vel in self.state.wheelSpinVel]
-        features[72] = self.state.z
-        
+        features = np.array([
+            [
+            self.state.angle,
+            self.state.curLapTime,
+            self.state.damage,
+            self.state.distFromStart,
+            self.state.distRaced,
+            self.state.fuel,
+            self.state.lastLapTime,
+            *self.state.opponents,  # Opponent distances
+            self.state.racePos,
+            self.state.rpm,
+            self.state.speedX,
+            self.state.speedY,
+            self.state.speedZ,
+            *self.state.track,  # Track sensor data
+            self.state.trackPos,
+            *self.state.wheelSpinVel,  # Wheel velocities
+            self.state.z
+            ]
+        ], dtype=np.float64)
         # Scale the features using the same scaler used during training
         return self.scaler.transform(features)
     
