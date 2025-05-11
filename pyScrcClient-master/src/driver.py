@@ -1,18 +1,16 @@
+
 import warnings
 import msgParser
 import carState
 import carControl
+import keyboard
 import time
 import os
 import csv
-import keyboard
 import numpy as np
 import joblib
 from datetime import datetime
-import pickle
 import tensorflow as tf
-from tensorflow.keras.models import load_model
-import keras
 
 class Driver(object):
     '''
@@ -49,6 +47,9 @@ class Driver(object):
         self.manual_influence = 0.0      # How much manual steering is applied (0.0-1.0)
         self.target_position = 0.0       # Target track position (-1.0 to 1.0)
         self.position_change_rate = 0.05 # How quickly target position changes
+        self.stds = np.load('../models/stds.npy', allow_pickle=True)
+        self.means = np.load('../models/means.npy', allow_pickle=True)
+        
         
         # steering parameters
         self.steer_lock = 0.785398
@@ -71,18 +72,23 @@ class Driver(object):
         print("Manual Controls: W: Accelerate | S: Brake/Reverse | A: Turn Left | D: Turn Right | Q: Quit")
         
     def load_ai_model(self):
-        '''Load the trained neural network model and scaler'''
-       
+        '''Load the trained TFLite model and scaler'''
         model_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
-        model_path = os.path.join(model_dir, "torcs_driver_model.keras")
+        tflite_path = os.path.join(model_dir, "model_driver.tflite")
         scaler_path = os.path.join(model_dir, "torcs_scaler.joblib")
         try:
-            self.model = load_model(model_path)
+            # Load TFLite model and allocate tensors
+            self.tflite_interpreter = tf.lite.Interpreter(model_path=tflite_path)
+            self.tflite_interpreter.allocate_tensors()
+            # Get input/output details for later use
+            self.tflite_input_details = self.tflite_interpreter.get_input_details()
+            self.tflite_output_details = self.tflite_interpreter.get_output_details()
+            # Load scaler
             self.scaler = joblib.load(scaler_path)
-            print(f"AI model loaded successfully from {model_path}")
+            print(f"TFLite model loaded successfully from {tflite_path}")
             self.model_loaded = True
         except Exception as e:
-            print(f"Failed to load AI model from: {model_path} and error: {e}")
+            print(f"Failed to load TFLite model: {e}")
             exit(1)
             print("Falling back to manual control mode")
             self.model_loaded = False
@@ -167,8 +173,8 @@ class Driver(object):
         
         # Check for mode switch
         if keyboard.is_pressed('m'):
-            # Simple debounce
-            time.sleep(0.2)
+            
+            
             if self.model_loaded:
                 self.ai_mode = not self.ai_mode
                 mode_name = "AI" if self.ai_mode else "Manual"
@@ -183,7 +189,7 @@ class Driver(object):
             self.handle_keyboard_input()
         
         # Save telemetry data
-       # self.log_data()
+        self.log_data()
         
         if keyboard.is_pressed('q'):
             print("User requested to quit")
@@ -194,65 +200,121 @@ class Driver(object):
     def prepare_state_for_model(self):
         '''Convert current car state to the format expected by the model'''
         # Create a feature vector in the same order as the training data
-        features = np.array([
-            [
-            self.state.angle,
-            self.state.curLapTime,
-            self.state.damage,
-            self.state.distFromStart,
-            self.state.distRaced,
-            self.state.fuel,
-            self.state.lastLapTime,
-            *self.state.opponents,  # Opponent distances
-            self.state.racePos,
-            self.state.rpm,
-            self.state.speedX,
-            self.state.speedY,
-            self.state.speedZ,
-            *self.state.track,  # Track sensor data
-            self.state.trackPos,
-            *self.state.wheelSpinVel,  # Wheel velocities
-            self.state.z
-            ]
-        ], dtype=np.float64)
+        # features = np.array([[
+        #     self.state.angle,
+        #     self.state.curLapTime,
+        #     self.state.damage,
+        #     self.state.distFromStart,
+        #     self.state.distRaced,
+        #     self.state.fuel,
+        #     self.state.lastLapTime,
+        #     # Add opponent distances - using first value for all if not available
+        #     *([self.state.opponents[0] if len(self.state.opponents) > 0 else 200.0] * 36),
+        #     self.state.racePos,
+        #     self.state.rpm,
+        #     self.state.speedX,
+        #     self.state.speedY,
+        #     self.state.speedZ,
+        #     # Add track sensor data
+        #     *([sensor for sensor in self.state.track]),
+        #     self.state.trackPos,
+        #     # Add wheel velocities
+        #     *([vel for vel in self.state.wheelSpinVel]),
+        #     self.state.z
+        # ]])
+
+        #--------------------------------------------------#
+
+        features = np.ndarray((71,), dtype=np.float64)
+        features[0] = self.state.angle
+        features[1] = self.state.distFromStart
+        features[2] = self.state.distRaced
+        features[3] = self.state.fuel
+        # Use gear_override if provided (for gear logic before prediction)
+        features[4] =  self.state.gear
+        features[5:41] = self.state.opponents
+        features[41] = self.state.racePos
+        features[42] = self.state.rpm
+        features[43] = self.state.speedX
+        features[44] = self.state.speedY
+        features[45] = self.state.speedZ
+        features[46:65] = self.state.track
+        features[65] = self.state.trackPos
+        features[66:70] = self.state.wheelSpinVel
+        features[70] = self.state.z
+
+        #---------------------------------------------#
+
         # Scale the features using the same scaler used during training
-        return self.scaler.transform(features)
-    
+        scaled_features = (features - self.means) / self.stds
+        # # Ensure the shape is correct for the model
+        scaled_features = scaled_features.reshape(1, -1)
+        
+
+        #scaled_features = self.scaler.transform(features)
+        
+        return scaled_features.reshape(1, -1)
     def handle_ai_control(self):
-        '''Use the trained neural network to control the car'''
+        '''Use the trained TFLite neural network to control the car'''
         try:
-            # Prepare input for the model
+            global count
+            count = 0
+            gear = self.control.getGear()
+            rpm = self.state.getRpm()
+            speed = self.state.getSpeedX()
+            distRaced = self.state.getDistRaced()
+            if rpm >= 9200 and gear < 6:
+                gear += 1
+                count = 0
+            elif rpm <= 5500 and gear > 1:
+                gear -= 1
+                count = 0
+            if int(distRaced) > 2 and speed < 4:
+                count += 1
+            if 20 <= count < 1200 * 3:
+                gear = -1
+                count += 1
+            if count >= 1200 * 3:
+                gear = 1
+                count = 0
+            self.control.setGear(gear)
+
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning, message="X does not have valid feature names")
-                scaled_state = self.prepare_state_for_model()
+                scaled_state = self.prepare_state_for_model().astype(np.float32)
        
             
-            # Get model predictions
-            predictions = self.model.predict(scaled_state.reshape(1,-1), verbose=0)[0]
-            
+            # Set input tensor
+            self.tflite_interpreter.set_tensor(self.tflite_input_details[0]['index'], scaled_state)
+            # Run inference
+            self.tflite_interpreter.invoke()
+            # Get output tensor
+            start_time = time.time()
+            predictions = self.tflite_interpreter.get_tensor(self.tflite_output_details[0]['index'])[0]
+            end_time = time.time()
+            print(f"Model inference time: {end_time - start_time:.4f} seconds")
             # Extract individual control values
             acceleration = float(predictions[0])  # Acceleration
             brake = float(predictions[1])         # Braking
-            steering = float(predictions[2])     # Steering
+            clutch = float(predictions[2])        # Clutch
+            steering = float(predictions[3])      # Steering
             
             # Clip values to valid ranges
             acceleration = max(0.0, min(1.0, acceleration))
             brake = max(0.0, min(1.0, brake))
-           # clutch = max(0.0, min(1.0, clutch))
+            clutch = max(0.0, min(1.0, clutch))
             steering = max(-1.0, min(1.0, steering))
-
-        
+            
             # Apply the values to control
-            print(f"AI Control - Accel: {acceleration}, Brake: {brake}, Steering: {steering}")
             self.control.setAccel(acceleration)
             self.control.setBrake(brake)
             self.control.setSteer(steering)
-            
+            self.control.setClutch(clutch)            
             # Use rule-based gear selection instead of model prediction
-            self.set_gear_based_on_rpm()
+            #self.set_gear_based_on_rpm()
             
             # Update current steer for smoothness in transitions
-            self.current_steer = steering
+            #self.current_steer = steering
             
         except Exception as e:
             print(f"Error in AI control: {e}")

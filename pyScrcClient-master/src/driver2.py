@@ -76,7 +76,7 @@ class Driver(object):
        
         model_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
         model_path = os.path.join(model_dir, "FullModel_Symm1024_b2048.h5")
-        model_path = r'../models/FullModel_Symm1024_b2048.h5'
+        model_path = r'../models/torcs_model_driver.h5'
         scaler_path = os.path.join(model_dir, "torcs_scaler.joblib")
         try:
             self.model = load_model(model_path)
@@ -220,11 +220,11 @@ class Driver(object):
     def handle_ai_control(self):
         '''Use the trained neural network to control the car'''
         try:
-            # --- Gear logic before prediction (as in client.py) ---
+           
             gear = self.state.gear
             rpm = self.state.rpm
             speed = self.state.speedX
-            # Reverse logic (optional, as in client.py)
+            # Reverse logic 
             count = 0
             if rpm >= 9200 and gear < 6:
                 gear += 1
@@ -243,13 +243,13 @@ class Driver(object):
             
             # Prepare input for the model with gear override
             scaled_state = self.prepare_state_for_model(gear_override=gear)
-            # --- Model prediction (no timing, no clipping, direct assignment) ---
+            # --- Model prediction  ---
             start_time = time.time()
             predictions = self.model.predict(scaled_state.reshape(1, -1), batch_size=1).flatten()
             end_time = time.time()
             print(f"Model prediction time: {end_time - start_time:.4f} seconds")  
             print(f"Predictions: {predictions}")
-            # Assign predictions directly
+           
             self.control.setAccel(predictions[0])
             self.control.setBrake(predictions[1])
             self.control.setClutch(predictions[2])

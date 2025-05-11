@@ -62,7 +62,7 @@ while not shutdownClient:
         if buf.find('***identified***') >= 0:
             break
 
-    # --- Step-based main loop like client.py ---
+    # --- Step-based main loop ---
     if arguments.max_steps == 0:
         arguments.max_steps = 1000000
     for step in range(arguments.max_steps, 0, -1):
