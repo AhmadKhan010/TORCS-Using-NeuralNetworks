@@ -269,15 +269,28 @@ class Driver(object):
             elif rpm <= 5500 and gear > 1:
                 gear -= 1
                 count = 0
-            if int(distRaced) > 2 and speed < 4:
-                count += 1
-            if 20 <= count < 1200 * 3:
-                gear = -1
-                count += 1
-            if count >= 1200 * 3:
+            
+            
+            
+            # if int(distRaced) > 2 and speed < 4:
+            #     count += 1
+            # if 20 <= count < 1200 * 3:
+            #     gear = -1
+            #     count += 1
+            # if count >= 1200 * 3:
+            #     gear = 1
+            #    count = 0
+
+            if abs(speed) < 2.0 and int(self.state.distRaced) > 5 and self.state.angle > 0.5:
+                if gear == 1 or gear == 0:
+                    gear = -1
+            
+            # If car is aligned with track and in reverse, switch to first gear
+            if abs(self.state.angle) < 0.2 and gear == -1 and abs(speed) < 3.0:
                 gear = 1
-                count = 0
+
             self.control.setGear(gear)
+            
 
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning, message="X does not have valid feature names")
